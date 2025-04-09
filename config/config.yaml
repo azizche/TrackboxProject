@@ -1,0 +1,17 @@
+defaults:
+  - _self_
+
+train:
+  batch_size: 32
+  num_epochs: 50
+  learning_rate: 0.001
+
+data:
+  sequence_length: 10
+
+model:
+  hidden_size: 128
+  num_layers: 2
+  dropout: 0.2
+
+
