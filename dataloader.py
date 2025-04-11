@@ -3,156 +3,132 @@ from torch.utils.data import Dataset
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import List, Tuple, Union
+from utils import get_ball_possession, MAX_X, MAX_Y, MIN_X, MIN_Y
+
+
 
 class FootballTrackingDataset(Dataset):
-    def __init__(
-        self,
-        data_root: str = "data",
-        match_ids: List[int] = [0, 1, 2],
-        sequence_length: int = 10,
-        transform=None,
-    ):
-        """
-        Args:
-            data_root (str): Root directory containing match folders
-            match_ids (List[int]): List of match IDs to include in the dataset
-            sequence_length (int): Number of consecutive frames to use as input
-            transform: Optional transform to be applied on a sample
-        """
-        self.data_root = Path(data_root)
+    def __init__(self, match_ids, sequence_length=10,data_path='data'):
+        self.match_ids = match_ids
         self.sequence_length = sequence_length
-        self.transform = transform
-        
-        # Load and concatenate all matching files
-        self.data = []
-        for match_id in match_ids:
-            match_dir = self.data_root / f"match_{match_id}"
+        self.data_path = data_path
+        self.data= []
+        for match_id in self.match_ids:
+            home=[]
+            away=[]
+            match_path = Path(f'{self.data_path}/match_{match_id}')
             
-            # Load Home data
-            home_path = match_dir / "Home.xlsx"
-            if home_path.exists():
-                home_df = pd.read_excel(home_path)
+            if (match_path / 'Home_cleaned.csv').exists():
+                data_home = pd.read_csv(match_path / 'Home_cleaned.csv')
+                data_away = pd.read_csv(match_path / 'Away_cleaned.csv')
             else:
-                home_path = match_dir / "Home.csv"
-                home_df = pd.read_csv(home_path)
-            self.data.append(home_df)
+                data_home = pd.read_excel(match_path / 'Home_cleaned.xlsx')
+                data_away = pd.read_excel(match_path / 'Away_cleaned.xlsx')
             
-            # Load Away data
-            away_path = match_dir / "Away.xlsx"
-            if away_path.exists():
-                away_df = pd.read_excel(away_path)
-            else:
-                away_path = match_dir / "Away.csv"
-                away_df = pd.read_csv(away_path)
-            self.data.append(away_df)
-        
-        self.data = pd.concat(self.data, ignore_index=True)
-        
-        
-        self.player_x_cols = [col for col in self.data.columns if (col.startswith('home') or col.startswith('away')) and col.endswith('_x')]
-        self.player_y_cols = [col for col in self.data.columns if (col.startswith('home') or col.startswith('away')) and col.endswith('_y')]
-        self.label_cols = ['ball_x', 'ball_y'] if 'ball_x' in self.data.columns else None
-        
-        # Handle null values and add player presence indicators
-        self._handle_null_values()
-        # Clip and normalize coordinates
-        self._clip_and_normalize_coordinates()
-        
-        self.feature_cols = [col for col in self.data.columns 
-                           if col not in ['MatchId', 'IdPeriod', 'Time','ball_x', 'ball_y']]
-        # Create sequences
-        self.sequences = []
-        # Group by IdPeriod instead of MatchId
-        period_groups = self.data.groupby('IdPeriod')
-        for _, period_data in period_groups:
-            # Create sequences of consecutive frames without sorting
-            for i in range(len(period_data) - sequence_length + 1):
-                sequence = period_data.iloc[i:i + sequence_length]
-                self.sequences.append(sequence)
-
-    def _handle_null_values(self):
-        """
-        Handle null values in the data:
-        - For player positions: fill with 0s and add presence indicators
-        - For ball positions: forward fill
-        """
-        # Create presence indicators for each player and reorder columns
+            for _ , grp in data_home.groupby("IdPeriod"):
+                home.append(grp)
+            for _ , grp in data_away.groupby("IdPeriod"):
+                away.append(grp)
+            
+            
+            first_half = pd.merge(home[0],away[0],on="Time",how="inner",suffixes=("","_duplicate"))
+            second_half = pd.merge(home[1],away[1],on="Time",how="inner",suffixes=("","_duplicate"))
+            
+            assert first_half.duplicated(subset=["Time"]).sum() == 0
+            assert second_half.duplicated(subset=["Time"]).sum() == 0
+            for col in first_half.columns:
+                if col.endswith("_duplicate"):
+                    first_half.drop(columns=[col],inplace=True)
+            for col in second_half.columns:
+                if col.endswith("_duplicate"):
+                    second_half.drop(columns=[col],inplace=True)
+            
+            self.data.append(first_half)
+            self.data.append(second_half)
+            
+        self.data_lengths = np.cumsum([len(data)-self.sequence_length for data in self.data])
+        self.ball_col_names = ["ball_x", "ball_y"]
+    
+    def _handle_null_values(self, sequence):
+       
+   
+        new_sequence = sequence.copy()
         new_column_order = []
-        for x_col, y_col in zip(self.player_x_cols, self.player_y_cols):
+        player_x_cols = [col for col in sequence.columns if (col.startswith('home') or col.startswith('away')) and col.endswith('_x')]
+        player_y_cols = [col for col in sequence.columns if (col.startswith('home') or col.startswith('away')) and col.endswith('_y')]
+        for x_col, y_col in zip(player_x_cols, player_y_cols):
             player_num = x_col.split('_')[0]+'_'+x_col.split('_')[1]
             presence_col = f'{player_num}_present'
             
-            # Create presence indicator (1 if player is on pitch, 0 if not)
-            self.data[presence_col] = (self.data[x_col].isna()).astype(int)
+            new_sequence[presence_col] = 1-((new_sequence[x_col].isna()) | (new_sequence[x_col]>10000.00 )| (new_sequence[y_col]>10000.00)).astype(int)
             
-            # Fill null positions with 0s
-            self.data[x_col] = self.data[x_col].fillna(0)
-            self.data[y_col] = self.data[y_col].fillna(0)
+            new_sequence[x_col] = new_sequence[x_col].fillna(0)
+            new_sequence[y_col] = new_sequence[y_col].fillna(0)
+            new_sequence.loc[new_sequence[x_col]>10000.00, x_col] = 0
+            new_sequence.loc[new_sequence[y_col]>10000.00, y_col] = 0
             
-            # Add columns to new order: x, y, presence
             new_column_order.extend([x_col, y_col, presence_col])
         
-        # Add remaining columns (ball coordinates, MatchId, IdPeriod, Time)
-        remaining_cols = [col for col in self.data.columns if col not in new_column_order]
+        remaining_cols = [col for col in sequence.columns if col not in new_column_order]
         new_column_order.extend(remaining_cols)
         
-        # Reorder columns
-        self.data = self.data[new_column_order]
+        new_sequence = new_sequence[new_column_order]
         
-        # Handle ball positions with forward fill
-        if 'ball_x' in self.data.columns and 'ball_y' in self.data.columns:
-            self.data['ball_x'] = self.data['ball_x'].ffill()
-            self.data['ball_y'] = self.data['ball_y'].ffill()
+        return new_sequence
+    
+    def normalize_coordinates(self, sequence):
+        
+        player_x_cols = [col for col in sequence.columns if (col.startswith('home') or col.startswith('away')) and col.endswith('_x')]
+        player_y_cols = [col for col in sequence.columns if (col.startswith('home') or col.startswith('away')) and col.endswith('_y')]
+    
+        for x_col in player_x_cols:
             
-            # If there are still nulls at the start, backfill them
-            self.data['ball_x'] = self.data['ball_x'].bfill()
-            self.data['ball_y'] = self.data['ball_y'].bfill()
-    def _clip_and_normalize_coordinates(self):
-        """
-        First clip coordinates to valid ranges, then normalize to [-1, 1].
-        Ball coordinates are clipped to x:[-5390, 5260] and y:[-3870.00, 3740.00]
-        Player coordinates are clipped to x:[-5830.00, 5770.00] and y:[-4020.00, 3960.00]
-        """
-        # Clip ball coordinates
-        if 'ball_x' in self.data.columns and 'ball_y' in self.data.columns:
-            self.data['ball_x'] = self.data['ball_x'].clip(-5390, 5260)
-            self.data['ball_y'] = self.data['ball_y'].clip(-3870.00, 3740.00)
+            sequence[x_col] = (sequence[x_col] / MAX_X)   
             
-            # Normalize ball coordinates to [-1, 1]
-            self.data['ball_x'] = (self.data['ball_x'] / 5390.0)
-            self.data['ball_y'] = (self.data['ball_y'] / 3870.0)
+        for y_col in player_y_cols:
+    
+            sequence[y_col] = (sequence[y_col] / MAX_Y)
+        if 'ball_x' in sequence.columns and 'ball_y' in sequence.columns:
+           
+            sequence['ball_x'] = (sequence['ball_x'] / MAX_X)
+            sequence['ball_y'] = (sequence['ball_y'] / MAX_Y)
         
      
+        return sequence
+    
+    def __len__(self):
         
-        for x_col in self.player_x_cols:
-            self.data[x_col] = self.data[x_col].clip(-5830.00, 5770.00)
-            self.data[x_col] = (self.data[x_col] / 5830.00)
+        return self.data_lengths[-1]
+    
+    def __getitem__(self, index):
+        for i, data_length in enumerate(self.data_lengths):
+            if index < data_length:
+                current_data = self.data[i]
+                if i!=0:
+                    index -= self.data_lengths[i-1]
+                break
+        
+        
+        start_idx = index 
+        end_idx = start_idx + self.sequence_length
+        
+        sequence = current_data.iloc[start_idx:end_idx]
+        
+        sequence = self._handle_null_values(sequence)
+        
+        sequence = self.normalize_coordinates(sequence)
+        player_col_names = [col for col in sequence.columns if col not in ["MatchId", "IdPeriod", "Time", "ball_x", "ball_y"]]
+        features = sequence.loc[:, player_col_names].values
+        
+        if 'ball_x' in sequence.columns and 'ball_y' in sequence.columns:
+            ball_features = sequence.loc[:, self.ball_col_names].values
+            ball_features = torch.tensor(ball_features, dtype=torch.float32)
+        else:
+            ball_features = torch.empty((self.sequence_length, 2))
             
-        for y_col in self.player_y_cols:
-            self.data[y_col] = self.data[y_col].clip(-4020.00, 3960.00)
-            self.data[y_col] = (self.data[y_col] / 4020.00)
-
-    def __len__(self) -> int:
-        return len(self.sequences)
-
-    def __getitem__(self, idx) -> Tuple[torch.Tensor, torch.Tensor]:
-        sequence = self.sequences[idx]
+        features = torch.tensor(features, dtype=torch.float32)
         
-        # Extract features (all positions)
-        features = sequence[self.feature_cols].values
+        return features, ball_features
         
-        # Convert to tensors
-        features = torch.FloatTensor(features)
-        
-        if self.transform:
-            features = self.transform(features)
-            
-        # Get labels (ball coordinates)
-        labels = sequence[self.label_cols].values if self.label_cols else torch.empty((0, 2),dtype=torch.float32)
-        labels = torch.FloatTensor(labels)
-        
-        return features, labels
-
 
 

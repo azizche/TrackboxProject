@@ -1,17 +1,17 @@
-defaults:
-  - _self_
+mode: train
+chkpt_path: checkpoints/football_tracking-epoch=05-val_loss=0.1083.ckpt
 
 train:
   batch_size: 32
   num_epochs: 50
-  learning_rate: 0.001
+  learning_rate: 1e-4
 
 data:
-  sequence_length: 10
+  sequence_length: 20
 
 model:
-  hidden_size: 128
-  num_layers: 2
+  hidden_size: 256
+  num_layers: 4
   dropout: 0.2
 
 
